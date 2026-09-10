@@ -269,16 +269,21 @@ class VehicleConnection:
         self._cancel_requested = False
 
     async def connect(self, host: str = DEFAULT_HOST, timeout: float = 5.0) -> None:
-        """Connect both CLI and telemetry channels.
+        """Connect CLI first, then telemetry.
 
-        CLIとテレメトリの両方を接続する
+        Keep the errors separate so a missing telemetry endpoint is not
+        misreported as the vehicle itself being unreachable.
         """
-        # Connect both in parallel
-        # 両方を並行して接続
-        await asyncio.gather(
-            self.cli.connect(host, timeout),
-            self.telemetry.connect(host, timeout),
-        )
+        await self.cli.connect(host, timeout)
+
+        try:
+            await self.telemetry.connect(host, timeout)
+        except Exception as exc:
+            await self.cli.disconnect()
+            raise ConnectionError(
+                f"Vehicle CLI is reachable at {host}:23, "
+                f"but telemetry connection failed: {exc}"
+            ) from exc
 
     async def send_flight_command(self, cmd: str, timeout: float = 5.0) -> str:
         """Send a flight command via CLI and return response.

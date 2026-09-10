@@ -517,10 +517,11 @@ async def _async_flight(
         console.print(f"  Connecting to {args.ip}...")
         try:
             await conn.connect(args.ip, timeout=5.0)
-        except OSError:
-            console.error(
-                "Vehicle not reachable. Connect to StampFly WiFi AP first."
-            )
+        except OSError as e:
+            console.error(f"Vehicle connection failed: {e}")
+            return 1
+        except ConnectionError as e:
+            console.error(str(e))
             return 1
         except ImportError as e:
             console.error(str(e))
