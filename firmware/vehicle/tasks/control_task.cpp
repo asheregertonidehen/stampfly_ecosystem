@@ -69,14 +69,17 @@ TaskHandle_t control_handle() { return s_control_handle; }
 /// @design requirements.md §7 — Data Stream（解析用・全レート）          [OK]
 /// @design architecture.md §5 — ログフロー: Data Stream                  [OK]
 static void publishLogStream(const sf::ControlOutput& control, uint8_t state,
-                             uint8_t sub_mode)
+                             uint8_t sub_mode, const sf::ImuData& imu,
+                             const sf::StateEstimate& est)
 {
-    const sf::ImuData       imu   = sf::sensor_imu.latest();
-    const sf::StateEstimate est   = sf::estimate_state.latest();
     const sf::MotorOutput   motor = sf::actuator_motor.latest();
 
     sf::LogStreamSample sample = {};
     sample.timestamp = imu.timestamp;
+    sample.rc_cycle = control.rc_cycle;
+    sample.rc_cycle.estimate_us = est.timestamp;
+    if (!(sample.rc_cycle.flags & sf::RcComputed))
+        sample.rc_cycle.timestamp = static_cast<uint32_t>(esp_timer_get_time());
     for (int i = 0; i < 3; ++i) {
         sample.gyro[i]       = imu.gyro[i];
         sample.accel[i]      = imu.accel[i];
@@ -254,6 +257,7 @@ void ControlTask(void* pvParameters)
         // Step 1: トピックから最新の状態とセットポイントを読む
         // =====================================================================
 
+        const sf::ImuData imu = sf::sensor_imu.latest();
         sf::StateEstimate state = sf::estimate_state.latest();
         sf::CommandSetpoint setpoint = sf::command_setpoint.latest();
         sf::SystemMode mode = sf::system_mode.latest();
@@ -310,7 +314,7 @@ void ControlTask(void* pvParameters)
             // ground data — at-rest sensor noise, handling — matters for analysis.
             // disarm 中も Data Stream は記録を続ける（制御ゼロのレコード）:
             // 静止時センサノイズやハンドリング等の地上データも解析に必要。
-            publishLogStream({}, mode.state, mode.sub_mode);
+            publishLogStream({}, mode.state, mode.sub_mode, imu, state);
             continue;
         }
 
@@ -340,10 +344,14 @@ void ControlTask(void* pvParameters)
         // タイムスタンプのエッジで一度だけ制御器へ渡す。モード検証とスティック
         // 解除則は制御器が所有する。
         {
-            static uint32_t last_guidance_ts = 0;
+            static uint32_t last_guidance_ts = 0, last_rc_id = 0;
+            static uint64_t last_rc_session = 0;
             const sf::GuidanceTarget target = sf::command_target.latest();
-            if (target.timestamp != 0 && target.timestamp != last_guidance_ts) {
+            const bool tagged = target.rc_session && target.rc_id;
+            if ((tagged && (target.rc_session != last_rc_session || target.rc_id != last_rc_id)) ||
+                (!tagged && target.timestamp != 0 && target.timestamp != last_guidance_ts)) {
                 last_guidance_ts = target.timestamp;
+                last_rc_session = target.rc_session; last_rc_id = target.rc_id;
                 controller.setGuidanceTarget(target, setpoint);
             }
         }
@@ -413,6 +421,6 @@ void ControlTask(void* pvParameters)
         // actuator_motor.latest() が「この周期」の duty を持つようにする）。
         // =====================================================================
 
-        publishLogStream(control, mode.state, mode.sub_mode);
+        publishLogStream(control, mode.state, mode.sub_mode, imu, state);
     }
 }

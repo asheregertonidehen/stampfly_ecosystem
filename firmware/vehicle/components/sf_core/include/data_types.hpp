@@ -26,6 +26,7 @@
 #pragma once
 
 #include <cstdint>
+#include "research_rc.hpp"
 
 namespace sf {
 
@@ -231,6 +232,7 @@ struct ButtonEvent {
 /// Control output: thrust and torque in body frame
 /// 制御出力: 機体座標系での推力とトルク
 struct ControlOutput {
+    ResearchRcCycle rc_cycle{};
     float thrust;         // Total thrust [N]      / 全推力
     float torque[3];      // Torque [Nm] R,P,Y     / トルク
     // Cascade setpoints, exported for the Data Stream (analysis/identification:
@@ -258,6 +260,7 @@ struct ControlOutput {
 /// TelemetryTask が 50Hz でリングを排出し UDP 1 パケットに 8 件をバッチする
 /// （実証済み firmware/vehicle と同じ電文・帯域設計: 50 sendto/s ≈ 48KB/s）。
 struct LogStreamSample {
+    ResearchRcCycle rc_cycle{};
     uint32_t timestamp;     // [us] IMU sample time          / IMU サンプル時刻
     float gyro[3];          // [rad/s] raw gyro, body FRD    / 生ジャイロ
     float accel[3];         // [m/s²] raw accel, body FRD    / 生加速度
@@ -699,6 +702,8 @@ struct SysidFreqResult {
 /// 追従）し、yaw はレート制限付き P ループで向く。Tello 風 API（ApiTask）と将来の
 /// Navigator が発行する。
 struct GuidanceTarget {
+    uint64_t rc_session = 0;
+    uint32_t rc_id = 0;
     float    position[3];   // target position [m] NED (mode 1) / 目標位置
     float    yaw;           // target yaw [rad]        (mode 1)  / 目標ヨー
     float    speed;         // approach speed [m/s]    (mode 1)  / 接近速度

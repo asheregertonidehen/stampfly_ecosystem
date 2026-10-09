@@ -73,6 +73,8 @@ extern Topic<ControllerStatus, Latest, 1>     controller_status; // guidance_act
 // =============================================================================
 
 extern Topic<MotorOutput,     Latest, 1>      actuator_motor;
+extern Topic<ResearchRcEvent, Queue, 32> log_rc_events;
+extern Topic<ResearchRcCounters, Latest, 1> rc_counters;
 extern Topic<LogStreamSample, RingBuffer, 32> log_stream;        // ControlTask 400Hz → TelemetryTask (Data Stream)
 extern Topic<FlowData,        RingBuffer, 8>  log_flow;          // ImuTask flow mirror → Data Stream。flow は差分量
                                                                  // （前回読み出しからの累積変位）ゆえ全サンプル配送が必須

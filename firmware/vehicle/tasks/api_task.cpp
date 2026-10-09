@@ -430,10 +430,10 @@ void cmdStop()
 // 送り続け応答を読まない）。速度誘導目標（mode 2）を publish し POS_HOLD のスティック速度
 // 再配置経路に乗る。パイロットの RC スティック操作で即解除（INV-2）。FLYING かつ API セッション
 // 有効時のみ有効（パイロット介入後は takeoff/go で再係合 — M-3）。送信停止時は保持へ自動復帰（R16）。
-void cmdRc(float a, float b, float c, float d)
+bool cmdRc(float a, float b, float c, float d, sf::ResearchRcEvent* evidence = nullptr)
 {
     if (currentState() != sf::FlightState::FLYING || !g_target_valid) {
-        return;   // fire-and-forget: silently ignore off-state / 状態外は黙って無視
+        return false;   // fire-and-forget: silently ignore off-state / 状態外は黙って無視
     }
     auto clamp100 = [](float v) {
         if (v >  100.0f) return  100.0f;
@@ -456,8 +456,16 @@ void cmdRc(float a, float b, float c, float d)
                          : (c / 100.0f) * vdn;    // down [m/s] / 降下
     t.vyaw = (d / 100.0f) * kRcYawRateMax;        // yaw rate cw+ [rad/s] / ヨーレート
     t.timestamp = static_cast<uint32_t>(esp_timer_get_time());
+    if (evidence) {
+        t.rc_session = evidence->session_id;
+        t.rc_id = evidence->command_id;
+        evidence->accepted_us = t.timestamp;
+        evidence->velocity[0] = t.vx; evidence->velocity[1] = t.vy;
+        evidence->velocity[2] = t.vz; evidence->velocity[3] = t.vyaw;
+    }
     sf::command_target.publish(t);
     // No reply — Tello rc is fire-and-forget. / 応答なし（rc は撃ちっぱなし）。
+    return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -944,7 +952,9 @@ void cmdAutotune(uint8_t axis, float wc, float pm_deg)
 // processLine — parse + execute one command line (shared HW / SILS path).
 // processLine — 1 コマンド行の解析＋実行（実機 / SILS 共通経路）。
 // -----------------------------------------------------------------------------
-void processLine(char* line)
+sf::ResearchRcSession research_session;
+uint32_t research_received = 0;
+void processLine(char* line, uint32_t received_us = static_cast<uint32_t>(esp_timer_get_time()))
 {
     // Trim trailing whitespace/newlines / 末尾の空白・改行を除去
     size_t n = std::strlen(line);
@@ -952,6 +962,25 @@ void processLine(char* line)
         line[--n] = '\0';
     }
     if (n == 0) return;
+    // Tagged requests use the same guidance path as legacy rc, with no UDP reply.
+    if (std::strncmp(line, "rcid ", 5) == 0) {
+        sf::TaggedRc cmd;
+        if (!sf::parseTaggedRc(line, cmd)) return; // no reliable identity to echo
+        sf::ResearchRcEvent ev{};
+        ev.received_us = received_us; ev.session_id = cmd.session; ev.command_id = cmd.id;
+        std::memcpy(ev.axes, cmd.axes, sizeof(ev.axes)); ev.axes_valid = cmd.axes_valid;
+        ev.flight_state = static_cast<uint8_t>(currentState());
+        const auto result = research_session.classify(cmd, g_client.sin_addr.s_addr,
+            g_client.sin_port, g_sdk_mode, currentState() == sf::FlightState::FLYING,
+            g_target_valid);
+        ev.result = static_cast<uint8_t>(result);
+        if (result == sf::RcResult::Accepted &&
+            !cmdRc(cmd.axes[0], cmd.axes[1], cmd.axes[2], cmd.axes[3], &ev))
+            ev.result = static_cast<uint8_t>(sf::RcResult::NotFlying);
+        sf::log_rc_events.publish(ev);
+        sf::rc_counters.publish(sf::ResearchRcCounters{++research_received});
+        return;
+    }
     ESP_LOGI(TAG, "cmd: %s", line);
 
     if (std::strcmp(line, "command") == 0) {
@@ -964,6 +993,17 @@ void processLine(char* line)
         return;
     }
 
+    if (std::strcmp(line, "rcproto?") == 0) { reply("rc-timing-v1"); return; }
+    if (std::strncmp(line, "rcbegin ", 8) == 0) {
+        uint64_t session = 0;
+        const auto state = currentState();
+        if (!sf::parseRcBegin(line, session) ||
+            (state != sf::FlightState::IDLE_GROUND && state != sf::FlightState::IDLE_HELD)) {
+            reply("error rc session requires ground and nonzero uint64"); return;
+        }
+        research_session.begin(session, g_client.sin_addr.s_addr, g_client.sin_port);
+        reply("ok"); return;
+    }
     // Emergency first — never behind any other gate.
     // emergency は最優先 — 他のゲートの後ろに置かない。
     if (std::strcmp(line, "emergency") == 0) {
@@ -1232,6 +1272,7 @@ void ApiTask(void* /*pvParameters*/)
                                          reinterpret_cast<sockaddr*>(&from),
                                          &from_len);
             if (r > 0) {
+                const uint32_t received_us = static_cast<uint32_t>(esp_timer_get_time());
                 line[r] = '\0';
                 g_client = from;          // reply to the latest sender / 最新送信者へ返信
                 g_have_client = true;
@@ -1243,7 +1284,7 @@ void ApiTask(void* /*pvParameters*/)
                 // 状態を待つ瞬間にストリームが始まる。
                 g_client_ip.store(from.sin_addr.s_addr, std::memory_order_relaxed);
                 g_client_known.store(true, std::memory_order_release);
-                processLine(line);
+                processLine(line, received_us);
                 continue;                 // drain quickly when commands queue up
             }
         }

@@ -35,6 +35,7 @@
 #include "pid_controller.hpp"
 #include "params.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <cmath>
 
 static const char* TAG = "PID";
@@ -223,6 +224,11 @@ ControlOutput PidController::compute(
     // インライン処理し、単一パイプライン（INV-1）を共有し、リンク生存中は姿勢を保つ（INV-2）。
     ControlOutput output = {};
     output.timestamp = state.timestamp;
+    const uint32_t cycle_us = static_cast<uint32_t>(esp_timer_get_time());
+    output.rc_cycle = research_cycle_;
+    output.rc_cycle.timestamp = cycle_us;
+    output.rc_cycle.flags &= (RcIdentified | RcFirstUseValid);
+    output.rc_cycle.flags |= RcComputed;
 
     // Extract Euler angles from quaternion
     // クォータニオンからオイラー角を抽出
@@ -318,7 +324,18 @@ ControlOutput PidController::compute(
                 // 速度を 0 に減衰し再捕捉・保持（止まった rc が暴走してはならない）。水平速度は
                 // computePositionHold（スティック再配置経路の再利用）、上昇率は鉛直ブロックで注入。
                 // ここでは yaw レート（cw+）のみ直接駆動する。
-                if (state.timestamp - guide_stamp_ > kLandingLinkStaleUs) {
+                const bool timed_out = static_cast<uint32_t>(cycle_us - guide_stamp_) > kLandingLinkStaleUs;
+                if (research_cycle_.session_id && research_cycle_.command_id) {
+                    output.rc_cycle.flags |= RcUsed;
+                    if (timed_out) output.rc_cycle.flags |= RcTimedOut;
+                    if (!timed_out && !(research_cycle_.flags & RcFirstUseValid)) {
+                        research_cycle_.first_used_us = cycle_us;
+                        research_cycle_.flags |= RcFirstUseValid;
+                    }
+                    output.rc_cycle.first_used_us = research_cycle_.first_used_us;
+                    output.rc_cycle.flags |= research_cycle_.flags & RcFirstUseValid;
+                }
+                if (timed_out) {
                     guide_vx_ = guide_vy_ = guide_vz_ = guide_vyaw_ = 0.0f;
                 }
                 rate_sp_yaw = guide_vyaw_;
@@ -1469,7 +1486,14 @@ void PidController::setGuidanceTarget(const GuidanceTarget& target,
         guide_vz_    = target.vz;
         guide_vyaw_  = target.vyaw;
         guide_stamp_ = target.timestamp;
+        if (research_cycle_.session_id != target.rc_session || research_cycle_.command_id != target.rc_id) {
+            research_cycle_ = {};
+            research_cycle_.session_id = target.rc_session;
+            research_cycle_.command_id = target.rc_id;
+            if (target.rc_session && target.rc_id) research_cycle_.flags = RcIdentified;
+        }
     } else {
+        research_cycle_ = {};
         guide_mode_   = 1;
         guide_pos_[0] = target.position[0];
         guide_pos_[1] = target.position[1];
@@ -1565,6 +1589,7 @@ bool PidController::fetchSysidResult(SysidFreqResult& out)
 
 void PidController::reset()
 {
+    research_cycle_ = {};
     rate_roll_.reset();  rate_pitch_.reset();  rate_yaw_.reset();
     att_roll_.reset();   att_pitch_.reset();
     alt_pos_.reset();    alt_vel_.reset();

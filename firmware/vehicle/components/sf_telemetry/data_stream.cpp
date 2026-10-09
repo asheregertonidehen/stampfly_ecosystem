@@ -205,6 +205,8 @@ void DataStream::startStream(const sockaddr_in& client)
     // 接続時リセット（欠損防止②）: リングの滞留を破棄し、キャプチャが古い
     // 滞留サンプルからでなく「今」から始まるようにする。
     LogStreamSample discard;
+    ResearchRcEvent discard_event;
+    while (log_rc_events.read(discard_event)) {}
     while (log_stream.read(discard)) {
     }
     FlowData flow_discard;
@@ -269,9 +271,10 @@ void DataStream::countDrop(bool added)
 // -----------------------------------------------------------------------------
 void DataStream::appendEntries(datastream::UnifiedPacketBuilder& builder)
 {
+    // Controller cycles/info precede duty; all mandatory entries fit the MTU.
     // 400Hz motor duty — the actual PLANT INPUT the mixer sent this control
     // cycle (all 8 samples of the batch, paired by index with the
-    // ImuEskf/RateRef blocks begin() already wrote). Added FIRST so it is
+    // ImuEskf/RateRef blocks begin() already wrote). Mandatory so it is
     // the last entry ever rejected by addEntry()'s size cap: rate-loop
     // system identification (`sf sysid fit`) needs the real duty, not a
     // Kp-reconstructed guess, and losing it silently would quietly degrade
@@ -282,6 +285,19 @@ void DataStream::appendEntries(datastream::UnifiedPacketBuilder& builder)
     // 先頭に追加する — レートループ同定（`sf sysid fit`）には Kp から推測した
     // 値でなく実際の duty が要る。黙って失うと誰も気づかないまま将来の同定
     // 精度がじわじわ落ちる（countDrop() 参照）。
+    datastream::WireRcCycle cycles[datastream::kSamplesPerPacket] = {};
+    for (int i = 0; i < datastream::kSamplesPerPacket; ++i) {
+        const auto& c = batch_[i].rc_cycle;
+        cycles[i] = {c.timestamp, c.estimate_us, c.first_used_us, c.session_id, c.command_id, c.flags};
+    }
+    countDrop(builder.addEntry(datastream::kPktRcCycle, cycles, sizeof(cycles)));
+    datastream::WireRcInfo info{};
+    info.timestamp_us = static_cast<uint32_t>(esp_timer_get_time());
+    info.received_count = rc_counters.latest().received;
+    info.event_ring_overflow = log_rc_events.overflowCount();
+    info.control_log_overflow = log_stream.overflowCount();
+    info.protocol_version = 1;
+    countDrop(builder.addEntry(datastream::kPktRcInfo, &info, sizeof(info)));
     datastream::WireDuty400 duty400[datastream::kSamplesPerPacket] = {};
     for (int i = 0; i < datastream::kSamplesPerPacket; ++i) {
         for (int m = 0; m < 4; ++m) {
@@ -342,6 +358,17 @@ void DataStream::appendEntries(datastream::UnifiedPacketBuilder& builder)
     }
     countDrop(builder.addEntry(datastream::kPktCtrlRef, &ctrl_ref, sizeof(ctrl_ref)));
 
+    // Never pop a receipt that cannot fit. Bursts are deferred; ring losses are counted.
+    ResearchRcEvent ev;
+    if (builder.canAddEntry(sizeof(datastream::WireRcEvent)) && log_rc_events.read(ev)) {
+        datastream::WireRcEvent wire{};
+        wire.received_us = ev.received_us; wire.accepted_us = ev.accepted_us;
+        wire.session_id = ev.session_id; wire.command_id = ev.command_id;
+        std::memcpy(wire.axes, ev.axes, sizeof(wire.axes));
+        wire.result = ev.result; wire.flight_state = ev.flight_state; wire.axes_valid = ev.axes_valid;
+        std::memcpy(wire.velocity, ev.velocity, sizeof(wire.velocity));
+        countDrop(builder.addEntry(datastream::kPktRcEvent, &wire, sizeof(wire)));
+    }
     // Flow: drain EVERY sample from the log_flow ring (typically 2 per packet
     // at 100Hz). Flow dx/dy are INCREMENTAL — displacement since the previous
     // read — so a latest()-snapshot peek would silently drop half the
@@ -352,7 +379,7 @@ void DataStream::appendEntries(datastream::UnifiedPacketBuilder& builder)
     // latest() スナップショット方式では変位の半分が黙って失われ、オフラインの
     // 積分・再生が壊れる。下の絶対量センサ（ToF/気圧/磁気）はスナップショットで安全。
     FlowData flow_sample;
-    while (log_flow.read(flow_sample)) {
+    while (builder.canAddEntry(sizeof(datastream::WireFlow)) && log_flow.read(flow_sample)) {
         datastream::WireFlow flow = {};
         flow.timestamp_us = flow_sample.timestamp;
         flow.dx           = flow_sample.dx;
@@ -364,30 +391,27 @@ void DataStream::appendEntries(datastream::UnifiedPacketBuilder& builder)
     // Low-rate ABSOLUTE sensors: append only when the per-sensor stamp advanced.
     // 低レートの「絶対量」センサ: センサ別時刻が進んだときだけ追加する。
     const SensorSnapshot snap = sensor_snapshot.latest();
-    if (snap.tof_timestamp != last_tof_ts_) {
-        last_tof_ts_ = snap.tof_timestamp;
+    if (snap.tof_timestamp != last_tof_ts_ && builder.canAddEntry(sizeof(datastream::WireTof))) {
         datastream::WireTof tof = {};
         tof.timestamp_us = snap.tof_timestamp;
         tof.distance     = snap.tof_distance;
         tof.status       = snap.tof_status;
-        countDrop(builder.addEntry(datastream::kPktTofBottom, &tof, sizeof(tof)));
+        if (builder.addEntry(datastream::kPktTofBottom, &tof, sizeof(tof))) last_tof_ts_ = snap.tof_timestamp;
     }
-    if (snap.baro_timestamp != last_baro_ts_) {
-        last_baro_ts_ = snap.baro_timestamp;
+    if (snap.baro_timestamp != last_baro_ts_ && builder.canAddEntry(sizeof(datastream::WireBaro))) {
         datastream::WireBaro baro = {};
         baro.timestamp_us = snap.baro_timestamp;
         baro.altitude     = snap.baro_altitude;
         baro.pressure     = snap.baro_pressure * 0.01f;   // Pa → hPa (wire unit)
-        countDrop(builder.addEntry(datastream::kPktBaro, &baro, sizeof(baro)));
+        if (builder.addEntry(datastream::kPktBaro, &baro, sizeof(baro))) last_baro_ts_ = snap.baro_timestamp;
     }
-    if (snap.mag_timestamp != last_mag_ts_) {
-        last_mag_ts_ = snap.mag_timestamp;
+    if (snap.mag_timestamp != last_mag_ts_ && builder.canAddEntry(sizeof(datastream::WireMag))) {
         datastream::WireMag mag = {};
         mag.timestamp_us = snap.mag_timestamp;
         for (int i = 0; i < 3; ++i) {
             mag.mag[i] = snap.mag[i];
         }
-        countDrop(builder.addEntry(datastream::kPktMag, &mag, sizeof(mag)));
+        if (builder.addEntry(datastream::kPktMag, &mag, sizeof(mag))) last_mag_ts_ = snap.mag_timestamp;
     }
 }
 

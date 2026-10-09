@@ -39,8 +39,13 @@ all: $(TARGET)
 $(TARGET): $(SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lm
 
-test: all
+test_research_rc: test_research_rc.cpp ../components/sf_controller_pid/pid_controller.cpp ../components/sf_autotune/autotune.cpp $(wildcard ../components/*/include/*.hpp)
+	$(CXX) $(CXXFLAGS) -o $@ test_research_rc.cpp ../components/sf_controller_pid/pid_controller.cpp ../components/sf_autotune/autotune.cpp -lm
+
+# Native research regression also tracks header-only protocol changes.
+test: all test_research_rc
 	./$(TARGET)
+	./test_research_rc
 
 clean:
-	rm -f $(TARGET) test_state_manager
+	rm -f $(TARGET) test_state_manager test_research_rc

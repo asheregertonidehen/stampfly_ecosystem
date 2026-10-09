@@ -312,6 +312,7 @@ private:
     float guide_vy_          = 0;          // [m/s] body right   (mode 2) / 機体左右
     float guide_vz_          = 0;          // [m/s] climb rate up+ (mode 2) / 上昇率
     float guide_vyaw_        = 0;          // [rad/s] yaw rate cw+ (mode 2) / ヨーレート
+    ResearchRcCycle research_cycle_{};
     uint32_t guide_stamp_    = 0;          // [us] last velocity-target stamp / 最終速度目標時刻
     float stick_snapshot_[4] = {0, 0, 0, 0};  // r,p,y,thr at engage / 設定時スティック
     float guide_yaw_kp_      = 2.0f;       // [1/s] yaw P gain / ヨー P ゲイン

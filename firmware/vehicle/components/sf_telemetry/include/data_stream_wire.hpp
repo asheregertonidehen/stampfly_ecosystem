@@ -114,7 +114,7 @@ inline constexpr int    kSamplesPerPacket = 8;
 /// 128B = float4 × 8サンプル）= 1237B、旧 1300B 上限に対して ~63B しか余白が
 /// 無かったため、WiFi MTU（1472）・PC 受信バッファ（2048）に対する余白を
 /// ~163B に戻す。
-inline constexpr size_t kUnifiedMaxSize   = 1400;
+inline constexpr size_t kUnifiedMaxSize   = 1472;
 
 // Quantization scales (PC side divides by these to restore physical units)
 // 量子化スケール（PC 側はこれで割って物理量に復元する）
@@ -313,7 +313,27 @@ struct WireStatusPayload {
 };
 static_assert(sizeof(WireStatusPayload) == 52, "wire drift");
 
+struct WireRcCycle {
+    uint32_t timestamp_us, estimate_us, first_used_us;
+    uint64_t session_id;
+    uint32_t command_id;
+    uint8_t flags;
+};
+struct WireRcEvent {
+    uint32_t received_us, accepted_us;
+    uint64_t session_id;
+    uint32_t command_id;
+    int8_t axes[4];
+    uint8_t result, flight_state, axes_valid, reserved;
+    float velocity[4];
+};
+struct WireRcInfo {
+    uint32_t timestamp_us, received_count, event_ring_overflow, control_log_overflow;
+    uint8_t protocol_version, reserved[3];
+};
 #pragma pack(pop)
+static_assert(sizeof(WireRcCycle) == 25 && sizeof(WireRcEvent) == 44 && sizeof(WireRcInfo) == 20);
+inline constexpr uint8_t kPktRcCycle = 0x4C, kPktRcEvent = 0x4D, kPktRcInfo = 0x4E;
 
 // =============================================================================
 // Packing helpers (pure functions — host-unit-testable)
@@ -417,6 +437,7 @@ public:
 
     /// Append one [id][size][payload] sensor entry. False if it would not fit.
     /// [id][size][payload] エントリを 1 つ追加。収まらなければ false。
+    bool canAddEntry(uint8_t size) const { return length_ + 2 + size + 1 <= kUnifiedMaxSize; }
     bool addEntry(uint8_t sensor_id, const void* payload, uint8_t size)
     {
         if (length_ + 2 + size + 1 > kUnifiedMaxSize) {   // +1 = checksum reserve

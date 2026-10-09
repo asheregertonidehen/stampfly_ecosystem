@@ -48,6 +48,8 @@ Topic<ButtonEvent,     Queue, 4>       button_event;
 Topic<ControlOutput,   Latest, 1>      control_output;
 Topic<ControllerStatus, Latest, 1>     controller_status;
 Topic<MotorOutput,     Latest, 1>      actuator_motor;
+Topic<ResearchRcEvent, Queue, 32> log_rc_events;
+Topic<ResearchRcCounters, Latest, 1> rc_counters;
 Topic<LogStreamSample, RingBuffer, 32> log_stream;
 Topic<FlowData,        RingBuffer, 8>  log_flow;
 Topic<SystemMode,      Latest, 1>      system_mode;
@@ -85,6 +87,8 @@ void topics_init()
     control_output.init();
     controller_status.init();
     actuator_motor.init();
+    log_rc_events.init();
+    rc_counters.init();
     log_stream.init();
     log_flow.init();
     system_mode.init();
